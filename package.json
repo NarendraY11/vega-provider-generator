@@ -1,6 +1,6 @@
 {
   "name": "vega-provider-generator",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "private": true,
   "scripts": {
     "dev": "next dev",
@@ -9,17 +9,16 @@
   },
   "dependencies": {
     "@sparticuz/chromium": "latest",
-    "esbuild": "latest",
     "jszip": "latest",
     "next": "latest",
     "puppeteer-core": "latest",
     "react": "latest",
-    "react-dom": "latest"
+    "react-dom": "latest",
+    "typescript": "latest"
   },
   "devDependencies": {
     "@types/node": "latest",
     "@types/react": "latest",
-    "@types/react-dom": "latest",
-    "typescript": "latest"
+    "@types/react-dom": "latest"
   }
 }
