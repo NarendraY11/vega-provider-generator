@@ -1,10 +1,13 @@
 import { NextResponse } from 'next/server';
 import dns from 'node:dns/promises';
 import net from 'node:net';
+import chromium from '@sparticuz/chromium';
+import puppeteer from 'puppeteer-core';
 
 export const runtime = 'nodejs';
+export const maxDuration = 60;
 const MAX_HTML = 3_000_000;
-const MAX_PAGES = 6;
+const MAX_PAGES = 8;
 
 function abs(value: string, base: string) { try { return new URL(value, base).href; } catch { return ''; } }
 function cleanText(value: string) { return value.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim(); }
@@ -18,7 +21,12 @@ async function assertPublicUrl(raw: string) {
   if (!['http:', 'https:'].includes(u.protocol)) throw new Error('Only http and https URLs are supported.');
   const host = u.hostname.toLowerCase();
   if (host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local') || host.endsWith('.internal') || isPrivateIp(host)) throw new Error('Local and internal addresses are not allowed.');
-  try { const records = await dns.lookup(host, { all: true }); if (records.some(record => isPrivateIp(record.address))) throw new Error('The hostname resolves to a private or local address.'); } catch (error) { if (error instanceof Error && /private|local/i.test(error.message)) throw error; }
+  try {
+    const records = await dns.lookup(host, { all: true });
+    if (records.some(record => isPrivateIp(record.address))) throw new Error('The hostname resolves to a private or local address.');
+  } catch (error) {
+    if (error instanceof Error && /private|local/i.test(error.message)) throw error;
+  }
 }
 function parseAnchors(html: string, base: string) {
   return [...html.matchAll(/<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi)].map(m => ({ text: cleanText(m[2]), url: abs(m[1], base) })).filter(x => x.text && x.url);
@@ -38,11 +46,11 @@ function jsonLd(html: string) {
   return out;
 }
 function mediaUrls(html: string, base: string) {
-  return [...html.matchAll(/(?:https?:)?\/\/[^\s"'<>]+\.(?:m3u8|mp4|webm)(?:\?[^\s"'<>]*)?/gi)].map(m => abs(m[0], base)).filter(Boolean).slice(0, 30);
+  return [...html.matchAll(/(?:https?:)?\/\/[^\s"'<>]+\.(?:m3u8|mp4|webm)(?:\?[^\s"'<>]*)?/gi)].map(m => abs(m[0], base)).filter(Boolean).slice(0, 40);
 }
 function apiHints(html: string, base: string) {
   const hints = [...html.matchAll(/(?:https?:)?\/\/[^\s"'<>]*(?:\/api\/|\/graphql|\.json(?:\?|$)|ajax|player|stream)[^\s"'<>]*/gi)].map(m => abs(m[0], base)).filter(Boolean);
-  return [...new Set(hints)].slice(0, 20);
+  return [...new Set(hints)].slice(0, 30);
 }
 function classify(url: string, home: string) {
   try {
@@ -53,46 +61,93 @@ function classify(url: string, home: string) {
     return 'other';
   } catch { return 'other'; }
 }
-async function fetchPage(url: string, signal: AbortSignal) {
+
+async function fetchHttp(url: string, signal: AbortSignal) {
   await assertPublicUrl(url);
-  const r = await fetch(url, { headers: { 'user-agent': 'Mozilla/5.0 VegaProviderGenerator/2.0' }, redirect: 'follow', signal });
+  const r = await fetch(url, { headers: { 'user-agent': 'Mozilla/5.0 (compatible; VegaProviderGenerator/3.0)' }, redirect: 'follow', signal });
   await assertPublicUrl(r.url);
   const contentLength = Number(r.headers.get('content-length') || 0);
   if (contentLength > MAX_HTML) throw new Error('The page is too large to analyze (3 MB limit).');
-  return { url: r.url, status: r.status, contentType: r.headers.get('content-type') || '', html: (await r.text()).slice(0, MAX_HTML) };
+  return { url: r.url, status: r.status, contentType: r.headers.get('content-type') || '', html: (await r.text()).slice(0, MAX_HTML), rendered: false };
+}
+
+async function renderBrowser(url: string) {
+  await assertPublicUrl(url);
+  let browser: Awaited<ReturnType<typeof puppeteer.launch>> | null = null;
+  try {
+    chromium.setGraphicsMode = false;
+    browser = await puppeteer.launch({
+      args: [...chromium.args, '--disable-dev-shm-usage', '--no-sandbox', '--disable-setuid-sandbox'],
+      defaultViewport: { width: 1440, height: 1000 },
+      executablePath: await chromium.executablePath(),
+      headless: true,
+    });
+    const page = await browser.newPage();
+    await page.setUserAgent('Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36');
+    await page.setExtraHTTPHeaders({ 'accept-language': 'en-US,en;q=0.9' });
+    await page.setRequestInterception(true);
+    page.on('request', request => {
+      const u = request.url();
+      if (!/^https?:/i.test(u) || /^(data|blob):/i.test(u)) return request.continue().catch(() => {});
+      try { if (isPrivateIp(new URL(u).hostname)) return request.abort().catch(() => {}); } catch {}
+      return request.continue().catch(() => {});
+    });
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 25000 });
+    await new Promise(resolve => setTimeout(resolve, 3500));
+    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    const html = (await page.content()).slice(0, MAX_HTML);
+    return { url: page.url(), status: 200, contentType: 'text/html; charset=utf-8', html, rendered: true };
+  } finally { if (browser) await browser.close().catch(() => {}); }
+}
+
+async function fetchSmart(url: string, signal: AbortSignal) {
+  let first: Awaited<ReturnType<typeof fetchHttp>> | null = null;
+  try { first = await fetchHttp(url, signal); } catch {}
+  const challenge = !first || first.status >= 400 || /just a moment|checking your browser|enable javascript|cf-chl-|challenge-platform/i.test(first.html);
+  if (challenge) {
+    try { return await renderBrowser(url); } catch {}
+  }
+  if (first && (first.html.length < 2500 || /<script\b/i.test(first.html))) {
+    try { return await renderBrowser(first.url); } catch {}
+  }
+  if (first) return first;
+  throw new Error('The website could not be fetched or rendered.');
 }
 
 export async function POST(req: Request) {
-  const controller = new AbortController(); const timeout = setTimeout(() => controller.abort(), 18000);
+  const controller = new AbortController(); const timeout = setTimeout(() => controller.abort(), 55000);
   try {
     const { url } = await req.json();
     if (!url || !/^https?:\/\//i.test(url)) return NextResponse.json({ error: 'Enter a valid http/https URL.' }, { status: 400 });
-    const first = await fetchPage(url, controller.signal); const origin = new URL(first.url).origin;
-    const allLinks = parseAnchors(first.html, first.url); const sameHost = allLinks.filter(x => { try { return new URL(x.url).origin === origin; } catch { return false; } });
-    const categoryLinks = sameHost.filter(x => /\/(?:category|categories|genre|genres|collection|collections|browse|catalog|popular|latest|trending|movies?|shows?|series|anime|tv)(?:\/|$)/i.test(new URL(x.url).pathname)).slice(0, 20);
-    const detailLinks = sameHost.filter(x => /\/(?:watch|play|episode|ep|movie|film|show|series|anime|title|detail)(?:[-_\/]|\d|$)/i.test(new URL(x.url).pathname)).slice(0, 24);
+    const first = await fetchSmart(url, controller.signal); const origin = new URL(first.url).origin;
+    const allLinks = parseAnchors(first.html, first.url);
+    const sameHost = allLinks.filter(x => { try { return new URL(x.url).origin === origin; } catch { return false; } });
+    const categoryLinks = sameHost.filter(x => /\/(?:category|categories|genre|genres|collection|collections|browse|catalog|popular|latest|trending|movies?|shows?|series|anime|tv)(?:\/|$)/i.test(new URL(x.url).pathname)).slice(0, 24);
+    const detailLinks = sameHost.filter(x => /\/(?:watch|play|episode|ep|movie|film|show|series|anime|title|detail)(?:[-_\/]|\d|$)/i.test(new URL(x.url).pathname)).slice(0, 32);
     const candidates = [...new Map([first.url, ...categoryLinks.map(x => x.url), ...detailLinks.map(x => x.url)].map(u => [u, u])).values()].slice(0, MAX_PAGES);
     const pages: any[] = [];
     for (const candidate of candidates) {
-      if (candidate === first.url) { pages.push({ url: first.url, status: first.status, contentType: first.contentType, html: first.html }); continue; }
-      try { pages.push({ ...(await fetchPage(candidate, controller.signal)) }); } catch {}
+      if (candidate === first.url) pages.push(first);
+      else { try { pages.push(await fetchSmart(candidate, controller.signal)); } catch {} }
       if (pages.length >= MAX_PAGES) break;
     }
     const combinedLinks = pages.flatMap(p => parseAnchors(p.html, p.url));
-    const links = [...new Map(combinedLinks.map(x => [x.url, x])).values()].slice(0, 300);
-    const images = [...new Set(pages.flatMap(p => { const meta = [...p.html.matchAll(/<meta\b[^>]*(?:property|name)=["'](?:og:image|twitter:image)["'][^>]*content=["']([^"']+)/gi)].map(m => abs(m[1], p.url)); const imgs = [...p.html.matchAll(/<img\b[^>]*(?:src|data-src)=["']([^"']+)/gi)].map(m => abs(m[1], p.url)); return [...meta, ...imgs].filter(v => /\.(?:jpg|jpeg|png|webp|gif)(?:$|\?)/i.test(v)); }))].slice(0, 20);
-    const videos = [...new Set(pages.flatMap(p => [...p.html.matchAll(/<(?:video|source)\b[^>]*(?:src|data-src|data-url)=["']([^"']+)/gi)].map(m => abs(m[1], p.url)).filter(Boolean)))].slice(0, 30);
-    const streams = [...new Set(pages.flatMap(p => mediaUrls(p.html, p.url)))].slice(0, 40);
-    const iframes = [...new Set(pages.flatMap(p => [...p.html.matchAll(/<iframe\b[^>]*src=["']([^"']+)/gi)].map(m => abs(m[1], p.url)).filter(Boolean)))].slice(0, 30);
+    const links = [...new Map(combinedLinks.map(x => [x.url, x])).values()].slice(0, 400);
+    const images = [...new Set(pages.flatMap(p => { const meta = [...p.html.matchAll(/<meta\b[^>]*(?:property|name)=["'](?:og:image|twitter:image)["'][^>]*content=["']([^"']+)/gi)].map(m => abs(m[1], p.url)); const imgs = [...p.html.matchAll(/<img\b[^>]*(?:src|data-src|data-lazy-src|data-original)=["']([^"']+)/gi)].map(m => abs(m[1], p.url)); return [...meta, ...imgs].filter(v => /\.(?:jpg|jpeg|png|webp|gif)(?:$|\?)/i.test(v)); }))].slice(0, 30);
+    const videos = [...new Set(pages.flatMap(p => [...p.html.matchAll(/<(?:video|source)\b[^>]*(?:src|data-src|data-url|data-file|data-video|data-hls)=["']([^"']+)/gi)].map(m => abs(m[1], p.url)).filter(Boolean)))].slice(0, 40);
+    const streams = [...new Set(pages.flatMap(p => mediaUrls(p.html, p.url)))].slice(0, 50);
+    const iframes = [...new Set(pages.flatMap(p => [...p.html.matchAll(/<iframe\b[^>]*src=["']([^"']+)/gi)].map(m => abs(m[1], p.url)).filter(Boolean)))].slice(0, 40);
     const forms = pages.flatMap(p => parseForms(p.html, p.url));
     const search = forms.find(x => /^(get|post)$/i.test(x.method) && /q|query|search|keyword|term/i.test(x.input)) || null;
-    const api = [...new Set(pages.flatMap(p => apiHints(p.html, p.url)))].slice(0, 30);
-    const structuredTitles = pages.flatMap(p => jsonLd(p.html)).map(x => x?.name).filter(Boolean).slice(0, 20);
-    const categories = [...new Set(categoryLinks.map(x => x.text).filter(x => x.length > 2 && x.length < 80))].slice(0, 30);
-    const samples = pages.map(p => ({ url: p.url, title: p.html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]?.replace(/\s+/g, ' ').trim() || new URL(p.url).hostname, kind: classify(p.url, first.url), links: parseAnchors(p.html, p.url).slice(0, 80), streams: mediaUrls(p.html, p.url), iframes: [...p.html.matchAll(/<iframe\b[^>]*src=["']([^"']+)/gi)].map(m => abs(m[1], p.url)).filter(Boolean).slice(0, 10) }));
+    const api = [...new Set(pages.flatMap(p => apiHints(p.html, p.url)))].slice(0, 40);
+    const structuredTitles = pages.flatMap(p => jsonLd(p.html)).map(x => x?.name).filter(Boolean).slice(0, 30);
+    const categories = [...new Set(categoryLinks.map(x => x.text).filter(x => x.length > 2 && x.length < 80))].slice(0, 40);
+    const samples = pages.map(p => ({ url: p.url, title: p.html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]?.replace(/\s+/g, ' ').trim() || new URL(p.url).hostname, kind: classify(p.url, first.url), links: parseAnchors(p.html, p.url).slice(0, 100), streams: mediaUrls(p.html, p.url), iframes: [...p.html.matchAll(/<iframe\b[^>]*src=["']([^"']+)/gi)].map(m => abs(m[1], p.url)).filter(Boolean).slice(0, 15), rendered: !!p.rendered, status: p.status }));
     const title = first.html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]?.replace(/\s+/g, ' ').trim() || new URL(first.url).hostname;
     const description = first.html.match(/<meta[^>]+name=["']description["'][^>]+content=["']([^"']*)/i)?.[1] || '';
-    return NextResponse.json({ url: first.url, title, description, images, videos, streams, iframes, links, categories, categoryLinks, detailLinks, search, apiHints: api, structuredTitles, samplePages: samples, crawledPages: pages.length, status: first.status, contentType: first.contentType, dynamicHint: streams.length === 0 && (iframes.length > 0 || /<script\b/i.test(first.html)), warnings: [ ...(detailLinks.length ? [] : ['No obvious detail-page links were found; metadata/episodes may need manual adjustment.']), ...(streams.length || iframes.length ? [] : ['No public stream URL or iframe was visible in analyzed HTML; the generated provider will rely on WebView and may still need site-specific player logic.']), ...(search ? [] : ['No reliable GET/POST search form was found; search will fall back to homepage filtering.']) ] });
+    const challengeDetected = first.status >= 400 || /just a moment|checking your browser|cf-chl-|challenge-platform/i.test(first.html);
+    return NextResponse.json({ url: first.url, title, description, images, videos, streams, iframes, links, categories, categoryLinks, detailLinks, search, apiHints: api, structuredTitles, samplePages: samples, crawledPages: pages.length, renderedPages: pages.filter(p => p.rendered).length, status: first.status, contentType: first.contentType, dynamicHint: streams.length === 0 && (iframes.length > 0 || /<script\b/i.test(first.html)), challengeDetected, warnings: [ ...(detailLinks.length ? [] : ['No obvious detail-page links were found; metadata/episodes may need manual adjustment.']), ...(streams.length || iframes.length ? [] : ['No public stream URL or iframe was visible in analyzed HTML; the generated provider will use WebView and may still need site-specific player logic.']), ...(search ? [] : ['No reliable GET/POST search form was found; search will fall back to homepage filtering.']), ...(challengeDetected && first.rendered ? ['The site initially returned a browser challenge, so the analyzer switched to a real Chromium browser renderer.'] : []), ...(challengeDetected && !first.rendered ? ['The site returned a browser challenge and could not be rendered by the server browser.'] : []) ] });
   } catch (error) {
     const message = error instanceof Error && error.name === 'AbortError' ? 'The website took too long to analyze.' : String(error instanceof Error ? error.message : error);
     return NextResponse.json({ error: message }, { status: 500 });
