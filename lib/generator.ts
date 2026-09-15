@@ -18,6 +18,7 @@ export type Analysis = {
 const slug = (s: string) => s.toLowerCase().replace(/https?:\/\//, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'website-provider';
 const unique = <T,>(items: T[], key: (item: T) => string) => items.filter((item, i, all) => all.findIndex(x => key(x) === key(item)) === i);
 const json = (value: unknown) => JSON.stringify(value);
+const normalizeGenerated = (value: string) => value.replace(/\\\\/g, '\\');
 
 export function generateProvider(a: Analysis, name: string) {
   const id = slug(name);
@@ -119,7 +120,7 @@ export const getEpisodes = async function ({ url, providerContext }: { url: stri
 };`;
 
   const stream = String.raw`import { Stream, ProviderContext } from "../types";
-function absolute(value: string, pageUrl: string) { try { return new URL(value.replace(/\\\//g, "/"), pageUrl).href; } catch { return ""; } }
+function absolute(value: string, pageUrl: string) { try { return new URL(value.split(String.fromCharCode(92) + "/").join("/"), pageUrl).href; } catch { return ""; } }
 function extract(html: string, pageUrl: string, cheerio: ProviderContext["cheerio"]) {
   const $ = cheerio.load(html); const streams: string[] = []; const frames: string[] = []; const subtitles: { title: string; language: string; type: "application/x-subrip" | "application/ttml+xml" | "text/vtt"; uri: string }[] = [];
   const add = (value: string) => { const u = absolute(value, pageUrl); if (u && /\.(?:m3u8|mp4|webm)(?:$|[?#])/i.test(u) && !streams.includes(u)) streams.push(u); };
@@ -140,10 +141,10 @@ export const getStream = async function ({ link, providerContext, isDownload }: 
 
   const files: Record<string, string> = {
     [`providers/${id}/catalog.ts`]: `export const catalog = [\n${catalog}\n];\nexport const genres = [\n${genres}\n];\n`,
-    [`providers/${id}/posts.ts`]: posts,
-    [`providers/${id}/meta.ts`]: meta,
-    [`providers/${id}/stream.ts`]: stream,
-    [`providers/${id}/episodes.ts`]: episodes,
+    [`providers/${id}/posts.ts`]: normalizeGenerated(posts),
+    [`providers/${id}/meta.ts`]: normalizeGenerated(meta),
+    [`providers/${id}/stream.ts`]: normalizeGenerated(stream),
+    [`providers/${id}/episodes.ts`]: normalizeGenerated(episodes),
     [`providers/${id}/provider-info.json`]: JSON.stringify({ generatorVersion: '2.0', source: a.url, capabilities: { catalog: true, search: Boolean(a.search), metadata: true, episodes: Boolean(detailLinks.length), streams: Boolean(a.streams?.length || a.iframes?.length), webViewFallback: true }, hints: { categoryCount: categoryLinks.length, detailCount: detailLinks.length, apiHints: a.apiHints || [] } }, null, 2),
     [`providers/${id}/README.md`]: `# ${name}\n\nGenerated Vega provider for ${a.url}.\n\nDetected ${categoryLinks.length} catalog candidates, ${detailLinks.length} detail candidates, ${a.search ? a.search.method.toUpperCase() + ' search' : 'no reliable HTML search form'}, ${a.streams?.length || 0} direct media URLs and ${a.iframes?.length || 0} embedded players.\n\nReview and test the generated source with the official Vega provider template before production use. The generator does not bypass DRM, authentication, paywalls, or anti-bot protections.\n`,
     'manifest-entry.json': JSON.stringify({ display_name: name, value: id, version: '2.0', icon: a.images[0] || '', type: 'global', disabled: false }, null, 2),
