@@ -1,4 +1,27 @@
 import { NextResponse } from 'next/server';
 import JSZip from 'jszip';
-import { generateProvider } from '@/lib/generator';
-export async function POST(req:Request){try{const {analysis,name}=await req.json();if(!analysis)return NextResponse.json({error:'Analysis is required'},{status:400});const result=generateProvider(analysis,name||analysis.title||'Website Provider');const zip=new JSZip();for(const [p,c] of Object.entries(result.files))zip.file(p,c);zip.file('GENERATOR-NOTES.md',`Generated automatically. Review and test the provider with the official Vega template before production use.\n\nSource: ${analysis.url}\n`);const blob=await zip.generateAsync({type:'base64'});return NextResponse.json({filename:`${result.id}-vega-provider.zip`,base64:blob,files:Object.keys(result.files)});}catch(e){return NextResponse.json({error:String(e)},{status:500})}}
+import { generateProvider } from '../../../lib/generator';
+
+export async function POST(req: Request) {
+  try {
+    const { analysis, name } = await req.json();
+    if (!analysis) {
+      return NextResponse.json({ error: 'Analysis is required' }, { status: 400 });
+    }
+    const result = generateProvider(analysis, name || analysis.title || 'Website Provider');
+    const zip = new JSZip();
+    for (const [path, content] of Object.entries(result.files)) zip.file(path, content);
+    zip.file(
+      'GENERATOR-NOTES.md',
+      `Generated automatically. Review and test the provider with the official Vega template before production use.\n\nSource: ${analysis.url}\n`,
+    );
+    const blob = await zip.generateAsync({ type: 'base64' });
+    return NextResponse.json({
+      filename: `${result.id}-vega-provider.zip`,
+      base64: blob,
+      files: Object.keys(result.files),
+    });
+  } catch (e) {
+    return NextResponse.json({ error: String(e) }, { status: 500 });
+  }
+}
