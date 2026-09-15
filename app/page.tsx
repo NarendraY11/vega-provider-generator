@@ -63,7 +63,7 @@ export default function Home() {
   return (
     <main className="wrap">
       <section className="hero">
-        <span className="badge">VEGA • PROVIDER GENERATOR 2.1</span>
+        <span className="badge">VEGA • PROVIDER GENERATOR 2.3</span>
         <h1>Turn a public website into a Vega provider.</h1>
         <p>
           Deep-analyze the site's public structure, crawl representative
@@ -150,11 +150,12 @@ export default function Home() {
             </div>
 
             <div className="panel" style={{marginTop: 16}}>
-              <h3>What the ZIP now contains</h3>
+              <h3>What you get</h3>
               <p className="muted">
-                A complete standalone Vega source repository: <b>manifest.json</b>,
-                provider TypeScript source, and pre-built <b>dist/</b> JavaScript.
-                You no longer need to run a build before first use.
+                The ZIP is already a standalone Vega source repository. It contains
+                <b> manifest.json</b>, the provider TypeScript source, and pre-built
+                <b> dist/</b> JavaScript. No npm install or build is required for a
+                standalone generated repository.
               </p>
             </div>
           </>
@@ -173,10 +174,19 @@ export default function Home() {
               Download Vega-ready ZIP
             </button>
             <p className="muted" style={{marginTop: 12}}>
-              Publish the ZIP contents at the root of a new GitHub repository.
+              <b>Next:</b> extract the ZIP, then upload the extracted files to the
+              root of a GitHub repository. Do not upload the ZIP as a single file.
+            </p>
+            <p className="muted">
               In Vega, tap <b>Settings → Provider Manager → +</b> and enter the
-              GitHub repository URL (for example, your own repository URL) or the
-              GitHub owner when your repository is named <b>vega-providers</b>.
+              GitHub repository URL. If the repository is named <b>vega-providers</b>,
+              you can enter the GitHub owner name instead.
+            </p>
+            <p className="muted">
+              For an existing multi-provider repository, copy the generated
+              <b> providers/</b> and <b>dist/</b> folders and merge
+              <b> manifest-entry.json</b> into the existing <b>manifest.json</b>.
+              Do not replace the existing manifest.
             </p>
           </div>
         )}
