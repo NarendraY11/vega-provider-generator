@@ -1,6 +1,6 @@
 import {NextResponse} from 'next/server';
 import JSZip from 'jszip';
-import ts from 'typescript';
+import * as ts from 'typescript';
 import {generateProvider} from '../../../lib/generator';
 
 function buildCommonJs(source: string): string {
